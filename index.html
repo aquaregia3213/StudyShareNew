@@ -600,6 +600,7 @@ let currentUser = null, currentUserData = null;
 let currentPage = 'home', folderPath = [], uploadSection = null;
 let activeFilter = 'All', notifications = [], uploadedFile = null;
 let allResources = [];
+let doubtSortMode = 'recent';
 
 // ── THEME ──
 window.toggleTheme = () => {
@@ -1331,7 +1332,15 @@ window.openFilePreview = (f) => {
       return;
     }
   }
+window.setFilter = (filter) => {
+  activeFilter = filter;
+  renderDoubts();
+};
 
+window.sortDoubts = (mode) => {
+  doubtSortMode = mode;
+  renderDoubts();
+};
   const url = f.fileUrl || f.externalLink || f.link || '';
 
   console.log('Opening file:', f);
@@ -1664,50 +1673,105 @@ function listenForDoubts() {
 
 async function renderDoubts() {
   const mc = document.getElementById('mainContent');
-  mc.innerHTML=`<div class="loading-state"><div class="spinner"></div>Loading...</div>`;
-  let q = activeFilter==='All'
-    ? query(collection(db,'doubts'),orderBy('createdAt','desc'))
-    : query(collection(db,'doubts'),where('subject','==',activeFilter),orderBy('createdAt','desc'));
-  const snap = await getDocs(q);
-  const doubts = snap.docs.map(d=>({id:d.id,...d.data()}));
-  const subClass={Mathematics:'sub-math',Science:'sub-sci',Engineering:'sub-eng',Other:'sub-other'};
-  mc.innerHTML=`
-  <div class="page-header"><h1 class="page-title">Doubt Solver</h1>
-    <button class="btn btn-primary" onclick="toggleDoubtForm()">+ Post a Doubt</button>
-  </div>
-  <div id="postDoubtFormArea"></div>
-  <div style="display:flex;gap:.45rem;flex-wrap:wrap;align-items:center;margin-bottom:1rem;">
-    ${['All','Mathematics','Science','Engineering','Other'].map(s=>`<div class="filter-chip ${activeFilter===s?'active':''}" onclick="setFilter('${s}')">${s}</div>`).join('')}
-    <select class="btn btn-secondary" style="margin-left:auto;border-radius:7px;font-size:.78rem;" onchange="sortDoubts(this.value)">
-      <option value="recent">Most Recent</option><option value="open">Open First</option><option value="answered">Answered First</option>
-    </select>
-  </div>
-  ${doubts.map(d=>`
-  <div class="doubt-card" id="dc-${d.id}">
-    <div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:.4rem;margin-bottom:.55rem;">
-      <div style="display:flex;gap:.4rem;flex-wrap:wrap;align-items:center;">
-        <span class="doubt-subject ${subClass[d.subject]||'sub-other'}">${d.subject||'Other'}</span>
-        <span class="doubt-status ${d.status==='answered'?'status-answered':'status-open'}">${d.status==='answered'?'✓ Answered':'Open'}</span>
+  mc.innerHTML = '<div class="loading-state"><div class="spinner"></div>Loading...</div>';
+
+  try {
+    const snap = await getDocs(query(collection(db, 'doubts'), orderBy('createdAt', 'desc')));
+    let doubts = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+
+    // filter
+    if (activeFilter !== 'All') {
+      doubts = doubts.filter(d => (d.subject || 'Other') === activeFilter);
+    }
+
+    // sort/filter mode
+    if (doubtSortMode === 'open') {
+      doubts = doubts.filter(d => d.status !== 'answered');
+    } else if (doubtSortMode === 'answered') {
+      doubts = doubts.filter(d => d.status === 'answered');
+    }
+
+    const subClass = {
+      Mathematics: 'sub-math',
+      Science: 'sub-sci',
+      Engineering: 'sub-eng',
+      Other: 'sub-other'
+    };
+
+    mc.innerHTML = `
+      <div class="page-header">
+        <h1 class="page-title">Doubt Solver</h1>
+        <button class="btn btn-primary" onclick="toggleDoubtForm()">✨ Post a Doubt</button>
       </div>
-      <span style="font-size:.7rem;color:var(--muted)">${d.createdAt?new Date(d.createdAt.seconds*1000).toLocaleDateString('en-IN'):''}</span>
-    </div>
-    <div style="font-weight:600;font-size:.88rem;margin-bottom:.35rem;">${d.question}</div>
-    <div style="font-size:.73rem;color:var(--muted);margin-bottom:.5rem;">Asked by <b>${d.askerName}</b> · ${(d.answers||[]).length} answer${(d.answers||[]).length!==1?'s':''}</div>
-    ${(d.answers||[]).map((a,ai)=>`
-      <div class="answer-item">
-        <div class="answer-by">${a.by} ${a.role==='verified'||a.role==='admin'?'<span class="verified-tag">✓</span>':''}</div>
-        ${a.text}
-        <div class="answer-rating">
-          Rate answer: ${[1,2,3,4,5].map(n=>`<span class="ar ${(a.rating||0)>=n?'lit':''}" onclick="rateAnswer('${d.id}',${ai},${n})">★</span>`).join('')}
-          ${a.rating?`<span style="font-size:.7rem;color:var(--muted);margin-left:.3rem">${a.rating.toFixed(1)}</span>`:''}
+
+      <div id="postDoubtFormArea"></div>
+
+      <div style="display:flex;gap:.45rem;flex-wrap:wrap;align-items:center;margin-bottom:1rem;">
+        ${['All','Mathematics','Science','Engineering','Other'].map(s => `
+          <div class="filter-chip ${activeFilter === s ? 'active' : ''}" onclick="setFilter('${s}')">${s}</div>
+        `).join('')}
+
+        <select class="btn btn-secondary" style="margin-left:auto;border-radius:7px;font-size:.78rem;" onchange="sortDoubts(this.value)">
+          <option value="recent" ${doubtSortMode === 'recent' ? 'selected' : ''}>Most Recent</option>
+          <option value="open" ${doubtSortMode === 'open' ? 'selected' : ''}>Open First</option>
+          <option value="answered" ${doubtSortMode === 'answered' ? 'selected' : ''}>Answered First</option>
+        </select>
+      </div>
+
+      ${doubts.map(d => `
+        <div class="doubt-card" id="dc-${d.id}">
+          <div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:.4rem;margin-bottom:.55rem;">
+            <div style="display:flex;gap:.4rem;flex-wrap:wrap;align-items:center;">
+              <span class="doubt-subject ${subClass[d.subject || 'Other']}">${d.subject || 'Other'}</span>
+              <span class="doubt-status ${d.status === 'answered' ? 'status-answered' : 'status-open'}">
+                ${d.status === 'answered' ? '✓ Answered' : 'Open'}
+              </span>
+            </div>
+            <span style="font-size:.7rem;color:var(--muted)">
+              ${d.createdAt?.seconds ? new Date(d.createdAt.seconds * 1000).toLocaleDateString('en-IN') : ''}
+            </span>
+          </div>
+
+          <div style="font-weight:600;font-size:.88rem;margin-bottom:.35rem;">
+            ${d.question || 'Untitled doubt'}
+          </div>
+
+          <div style="font-size:.73rem;color:var(--muted);margin-bottom:.5rem;">
+            Asked by <b>${d.askerName || 'Unknown'}</b> · ${(d.answers || []).length} answer${(d.answers || []).length !== 1 ? 's' : ''}
+          </div>
+
+          ${(d.answers || []).map((a, ai) => `
+            <div class="answer-item">
+              <div class="answer-by">
+                ${a.by || 'Unknown'} ${a.role === 'verified' || a.role === 'admin' || a.role === 'owner' ? '<span class="verified-tag">✓</span>' : ''}
+              </div>
+              ${a.text || ''}
+              <div class="answer-rating">
+                Rate answer:
+                ${[1,2,3,4,5].map(n => `
+                  <span class="ar ${(a.rating || 0) >= n ? 'lit' : ''}" onclick="rateAnswer('${d.id}', ${ai}, ${n})">★</span>
+                `).join('')}
+                ${a.rating ? `<span style="font-size:.7rem;color:var(--muted);margin-left:.3rem">${Number(a.rating).toFixed(1)}</span>` : ''}
+              </div>
+            </div>
+          `).join('')}
+
+          <div class="reply-input-row">
+            <input class="reply-input" type="text" placeholder="Write an answer..." id="reply-${d.id}" />
+            <button class="btn btn-primary" style="font-size:.78rem;padding:.4rem .85rem;" onclick="postReply('${d.id}')">Reply</button>
+          </div>
         </div>
-      </div>`).join('')}
-    <div class="reply-input-row">
-      <input class="reply-input" type="text" placeholder="Write an answer..." id="reply-${d.id}"/>
-      <button class="btn btn-primary" style="font-size:.78rem;padding:.4rem .85rem;" onclick="postReply('${d.id}')">Reply</button>
-    </div>
-  </div>`).join('')}
-  ${!doubts.length?'<p style="color:var(--muted)">No doubts in this category.</p>':''}`;
+      `).join('')}
+
+      ${!doubts.length ? '<p style="color:var(--muted)">No doubts in this category.</p>' : ''}
+    `;
+  } catch (e) {
+    console.error('renderDoubts error:', e);
+    mc.innerHTML = `
+      <div class="page-header"><h1 class="page-title">Doubt Solver</h1></div>
+      <div class="card"><p style="color:var(--red)">Failed to load doubts.</p></div>
+    `;
+  }
 }
 
 window.setFilter=(f)=>{activeFilter=f;renderDoubts();};
