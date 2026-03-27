@@ -534,7 +534,7 @@ import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, si
   from "https://www.gstatic.com/firebasejs/12.11.0/firebase-auth.js";
 import { getFirestore, collection, doc, setDoc, getDoc, getDocs, addDoc, updateDoc, deleteDoc, query, orderBy, onSnapshot, serverTimestamp, where, arrayUnion, increment, limit }
   from "https://www.gstatic.com/firebasejs/12.11.0/firebase-firestore.js";
-
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 const firebaseConfig = {
   apiKey: "AIzaSyBbotSZUhgfPAkwwb80YgfhTkSo9zyd0hU",
   authDomain: "studyshare-1924f.firebaseapp.com",
@@ -547,39 +547,50 @@ const firebaseConfig = {
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
+const SUPABASE_URL = "https://zanyjgbrikuvglbkluva.supabase.co";
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InphbnlqZ2JyaWt1dmdsYmtsdXZhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQ2Mjk0NjAsImV4cCI6MjA5MDIwNTQ2MH0.DY6scmpMLt_3aw905jR83Qu1M_xnmvEoScnGJwflcAE";
 
-// ── CLOUDINARY UPLOAD FUNCTION ──
-// Uses Cloudinary's free unsigned upload — no backend required.
-// Cloud name & upload preset are public/unsigned — safe to use in frontend.
-const CLOUDINARY_CLOUD_NAME = 'dy6fr0tsg';
-const CLOUDINARY_UPLOAD_PRESET = 'Codeblooded';
-const CLOUDINARY_UPLOAD_URL = `https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/auto/upload`;
+const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+// ── FILE UPLOAD FUNCTION ──
+// Uses 0x0.st (primary) → file.io (fallback) → tmpfiles.org (last resort)
+// Zero setup, no accounts, no API keys needed.
 
-async function uploadToPuter(file) {
-  if (!file) throw new Error("No file provided");
+async function uploadToSupabase(file, uploadSection, meta = {}) {
+  if (!file) throw new Error("No file selected.");
 
-  const formData = new FormData();
-  formData.append('file', file);
-  formData.append('upload_preset', CLOUDINARY_UPLOAD_PRESET);
-  formData.append('folder', 'studyshare');
-  // Add a unique public_id so filenames don't collide
-  const safeName = file.name.replace(/[^a-zA-Z0-9.-]/g, '_');
-  formData.append('public_id', `${Date.now()}_${safeName}`);
+  console.log(`Uploading to Supabase: ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB)`);
 
-  console.log(`Uploading to Cloudinary: ${file.name} (${(file.size/1024/1024).toFixed(2)} MB)`);
+  const safeName = file.name.replace(/[^\w.\-]+/g, '_');
+  const uid = currentUser?.uid || 'guest';
+  const year = meta.engYear || 'unknown-year';
+  const branch = (meta.branch || 'unknown-branch').replace(/[^\w.\-]+/g, '_');
+  const subject = (meta.subject || 'misc').replace(/[^\w.\-]+/g, '_');
+  const examYear = meta.examYear ? `/${meta.examYear}` : '';
 
-  const res = await fetch(CLOUDINARY_UPLOAD_URL, { method: 'POST', body: formData });
-  if (!res.ok) {
-    const errData = await res.json().catch(() => ({}));
-    throw new Error(errData?.error?.message || `Cloudinary upload failed (${res.status})`);
+  const filePath = `${uploadSection}/${year}/${branch}/${subject}${examYear}/${uid}_${Date.now()}_${safeName}`;
+
+  const { error: uploadError } = await supabase
+    .storage
+    .from('studyfiles')
+    .upload(filePath, file, {
+      cacheControl: '3600',
+      upsert: false
+    });
+
+  if (uploadError) {
+    console.error('Supabase upload error:', uploadError);
+    throw new Error(uploadError.message || 'Upload failed.');
   }
 
-  const data = await res.json();
-  console.log("Cloudinary upload success:", data.secure_url);
+  const { data: publicData } = supabase
+    .storage
+    .from('studyfiles')
+    .getPublicUrl(filePath);
+
   return {
-    secure_url: data.secure_url,
-    path: data.public_id,
-    name: data.original_filename,
+    secure_url: publicData.publicUrl,
+    path: filePath,
+    name: file.name,
     size: file.size
   };
 }
@@ -604,32 +615,68 @@ if (savedTheme === 'dark') document.getElementById('themeToggle')?.classList.add
 
 // ── AUTH STATE ──
 onAuthStateChanged(auth, async (user) => {
-  if (user) {
-    console.log("YOUR UID:", user.uid);
-    console.log("YOUR EMAIL:", user.email);
+  currentUser = user || null;   // ✅ THIS IS THE IMPORTANT FIX
 
-    const snap = await getDoc(doc(db, 'users', user.uid));
-    if (snap.exists()) currentUserData = snap.data();
-    else currentUserData = { name: user.email, role: 'student', branch: '' };
+  if (user) {
+    console.log("User signed in:", user.uid, user.email);
+
+    try {
+      const userRef = doc(db, 'users', user.uid);
+      const userSnap = await getDoc(userRef);
+
+      if (userSnap.exists()) {
+        currentUserData = userSnap.data();
+        console.log("Loaded user data:", currentUserData);
+      } else {
+        const defaultData = {
+          name: user.email?.split('@')[0] || "Student",
+          email: user.email || "",
+          role: 'student',
+          points: 0,
+          verificationStatus: 'none',
+          branch: '',
+          studentId: '',
+          createdAt: serverTimestamp()
+        };
+
+        await setDoc(userRef, defaultData);
+        currentUserData = defaultData;
+        console.log("Created new user profile:", currentUserData);
+      }
+    } catch (err) {
+      console.error("Auth load error:", err);
+      currentUserData = {
+        name: user.email || "Student",
+        email: user.email || "",
+        role: 'student',
+        points: 0,
+        branch: '',
+        studentId: ''
+      };
+      showToast("Could not fully load account data.");
+    }
+
     updateTopbar();
+
     document.getElementById('authModal').classList.add('hidden');
     document.getElementById('app').style.display = 'flex';
-    if (currentUserData?.role === 'admin' || currentUserData?.role === 'owner') {
-    document.getElementById('adminSidebarSection').classList.remove('hidden');
-      } else {
-           document.getElementById('adminSidebarSection').classList.add('hidden');
-          }
+
+    const isAdmin = currentUserData?.role === 'admin' || currentUserData?.role === 'owner';
+    const adminSection = document.getElementById('adminSidebarSection');
+    if (adminSection) adminSection.classList.toggle('hidden', !isAdmin);
+
     showPage('home');
     loadAllResources();
     listenForDoubts();
     listenForForums();
   } else {
-    currentUser = null; currentUserData = null;
+    currentUser = null;
+    currentUserData = null;
+
     document.getElementById('authModal').classList.remove('hidden');
     document.getElementById('app').style.display = 'none';
   }
 });
-
 function updateTopbar() {
   const initials = (currentUserData?.name || 'SU')
     .split(' ')
@@ -638,10 +685,14 @@ function updateTopbar() {
     .slice(0, 2)
     .toUpperCase();
 
-  document.getElementById('topAvatar').textContent = initials;
-  document.getElementById('topName').textContent = (currentUserData?.name || '').split(' ')[0];
-
+  const avatar = document.getElementById('topAvatar');
+  const nameEl = document.getElementById('topName');
   const pill = document.getElementById('topRolePill');
+
+  if (avatar) avatar.textContent = initials;
+  if (nameEl) nameEl.textContent = (currentUserData?.name || 'Student').split(' ')[0];
+
+  if (!pill) return;
 
   if (currentUserData?.role === 'owner') {
     pill.textContent = '👑 Owner';
@@ -698,7 +749,63 @@ function friendlyError(c){
   return {'auth/user-not-found':'No account found.','auth/wrong-password':'Wrong password.','auth/email-already-in-use':'Email already registered.','auth/invalid-email':'Invalid email.','auth/invalid-credential':'Invalid email or password.'}[c]||'Something went wrong.';
 }
 function showErr(el,msg){el.textContent=msg;el.classList.add('visible');}
+function canDeleteResource(file) {
+  if (!currentUser || !currentUserData || !file) return false;
 
+  const sameUid =
+    file.uploadedByUid &&
+    currentUser.uid &&
+    file.uploadedByUid === currentUser.uid;
+
+  const sameName =
+    file.uploadedBy &&
+    currentUserData?.name &&
+    file.uploadedBy.trim().toLowerCase() === currentUserData.name.trim().toLowerCase();
+
+  return (
+    sameUid ||
+    sameName ||
+    currentUserData.role === 'admin' ||
+    currentUserData.role === 'owner'
+  );
+}
+
+window.deleteResource = async (section, id, title = 'this file') => {
+  if (!section || !id) return;
+
+  const ok = confirm(`Delete "${title}"? This cannot be undone.`);
+  if (!ok) return;
+
+  try {
+    const snap = await getDoc(doc(db, section, id));
+    if (!snap.exists()) {
+      showToast('File not found.');
+      return;
+    }
+
+    const file = snap.data();
+
+    if (file.filePath) {
+      const { error: storageError } = await supabase
+        .storage
+        .from('studyfiles')
+        .remove([file.filePath]);
+
+      if (storageError) {
+        console.warn('Supabase delete warning:', storageError.message);
+      }
+    }
+
+    await deleteDoc(doc(db, section, id));
+
+    showToast('Resource deleted successfully.');
+    await loadAllResources();
+    renderPage();
+  } catch (e) {
+    console.error('Delete resource error:', e);
+    showToast('Failed to delete resource.');
+  }
+};
 // ── POINTS HELPER — use updateDoc+increment if field exists, setDoc merge as fallback ──
 async function addPoints(uid, pts) {
   if (!uid) return;
@@ -720,77 +827,51 @@ async function addPoints(uid, pts) {
 }
 
 window.grantAccess = async () => {
-  const err = document.getElementById('grantAccessError');
+  const email = document.getElementById('grantEmail')?.value.trim().toLowerCase();
+  const role = document.getElementById('grantRole')?.value;
+  const errDiv = document.getElementById('grantAccessError');
 
-  if (err) {
-    err.textContent = '';
-    err.classList.remove('visible');
+  if (!errDiv) return;
+  if (!email) {
+    errDiv.textContent = "Enter a valid email";
+    errDiv.classList.add('visible');
+    return;
   }
 
   if (!currentUser || !currentUserData) {
-    showToast('You must be logged in.');
+    errDiv.textContent = "You must be logged in to grant access.";
+    errDiv.classList.add('visible');
     return;
   }
 
-  if (!(currentUserData.role === 'owner' || currentUserData.role === 'admin')) {
-    if (err) {
-      err.textContent = 'You are not allowed to grant access.';
-      err.classList.add('visible');
-    }
-    return;
-  }
-
-  const email = document.getElementById('grantEmail')?.value.trim().toLowerCase();
-  const role = document.getElementById('grantRole')?.value;
-
-  if (!email) {
-    if (err) {
-      err.textContent = 'Enter a valid email.';
-      err.classList.add('visible');
-    }
-    return;
-  }
-
-  if (role === 'admin' && currentUserData.role !== 'owner') {
-    if (err) {
-      err.textContent = 'Only the owner can assign admin access.';
-      err.classList.add('visible');
-    }
+  if (currentUserData.role !== 'admin' && currentUserData.role !== 'owner') {
+    errDiv.textContent = "Only administrators can grant access.";
+    errDiv.classList.add('visible');
     return;
   }
 
   try {
     const q = query(collection(db, 'users'), where('email', '==', email));
-    const qs = await getDocs(q);
-
-    if (qs.empty) {
-      if (err) {
-        err.textContent = 'User not found. Ask them to register first.';
-        err.classList.add('visible');
-      }
+    const querySnapshot = await getDocs(q);
+    if (querySnapshot.empty) {
+      errDiv.textContent = "User not found. Ask them to register first.";
+      errDiv.classList.add('visible');
       return;
     }
 
-    for (const userDoc of qs.docs) {
+    for (const userDoc of querySnapshot.docs) {
       await updateDoc(doc(db, 'users', userDoc.id), {
-        role,
-        verified: true,
-        canGrantAccess: role === 'admin',
-        verificationStatus: 'approved'
+        role: role,
+        verificationStatus: role === 'author' ? 'approved' : 'none'
       });
     }
-
-    showToast(`Access granted: ${email} is now ${role}.`);
-
+    showToast(`${email} now has ${role} access.`);
+    errDiv.classList.remove('visible');
     document.getElementById('grantEmail').value = '';
-    document.getElementById('grantRole').value = 'author';
-
   } catch (e) {
-    console.error(e);
-    if (err) {
-      err.textContent = 'Failed to grant access.';
-      err.classList.add('visible');
-    }
+    console.error("Grant access error:", e);
+    errDiv.textContent = "Failed: " + e.message;
+    errDiv.classList.add('visible');
   }
 };
 
@@ -884,7 +965,16 @@ async function renderHome() {
   ${currentUserData?.verificationStatus==='pending'?`<div class="card" style="margin-bottom:1.25rem;border-color:var(--amber);background:var(--amber-light)"><span style="font-size:.85rem;font-weight:600;color:var(--amber)">⏳ Your verification request is pending admin approval.</span></div>`:''}
   <div class="section-h">Recently Added</div>
   <div class="file-grid">
-    ${recent.map(d=>fileCardHTML({id:d.id,...d.data()})).join('')||'<p style="color:var(--muted)">No resources yet — be the first to upload!</p>'}
+   ${recent.map(d => {
+  const data = d.data();
+  const section =
+    l.docs.some(x => x.id === d.id) ? 'lecture' :
+    p.docs.some(x => x.id === d.id) ? 'pastpapers' :
+    t.docs.some(x => x.id === d.id) ? 'textbooks' :
+    'studentnotes';
+
+  return fileCardHTML({ id: d.id, ...data, section });
+}).join('') || '<p style="color:var(--muted)">No resources yet — be the first to upload!</p>'}
   </div>`;
 }
 
@@ -899,7 +989,7 @@ async function renderBrowseAll() {
         <div class="section-h" style="margin:0">${title}</div>
         <button class="btn btn-secondary" onclick="showPage('${type}')" style="font-size:.75rem;padding:.3rem .75rem">View all</button>
       </div>
-      <div class="file-grid">${docs.map(d=>fileCardHTML({id:d.id,...d.data()})).join('')||'<p style="color:var(--muted)">None yet</p>'}</div>
+      <div class="file-grid">${docs.map(d=>fileCardHTML({id:d.id,...d.data(),section:type})).join('')||'<p style="color:var(--muted)">None yet</p>'}</div>
     </div>`;
   mc.innerHTML = `<div class="page-header"><h1 class="page-title">Browse All Resources</h1></div>
     ${section('📚 Lecture Notes',l.docs,'lecture')}
@@ -1069,7 +1159,7 @@ async function renderResourcePage(type) {
       ${uploadPanelHTML(type, canUpload)}
       ${navBtn('← Back', type, 'branch', [year, branch])}
       ${breadcrumbHTML(type, [year, branch, examYear + ' Exam'])}
-      <div class="file-grid">${files.map(f => fileCardHTML(f)).join('')}</div>
+      <div class="file-grid">${files.map(f=>fileCardHTML({...f, section:type})).join('')}</div>
       ${!files.length ? '<p style="color:var(--muted)">No papers here yet.</p>' : ''}`;
     return;
   }
@@ -1087,7 +1177,7 @@ async function renderResourcePage(type) {
       ${uploadPanelHTML(type, canUpload)}
       ${navBtn('← Back', type, 'branch', [year, branch])}
       ${breadcrumbHTML(type, [year, branch, subject])}
-      <div class="file-grid">${files.map(f => fileCardHTML(f)).join('')}</div>
+      <div class="file-grid">${files.map(f=>fileCardHTML({...f, section:type})).join('')}</div>
       ${!files.length ? '<p style="color:var(--muted)">No files here yet. Be the first to upload!</p>' : ''}`;
     return;
   }
@@ -1132,52 +1222,133 @@ function breadcrumbHTML(type, parts) {
   return h + '</div>';
 }
 
-function fileCardHTML(f){
-  const thumb = thumbColors[Math.abs((f.title||'').charCodeAt(0)||0)%thumbColors.length];
-  const avg = f.ratingCount>0 ? (f.ratingSum/f.ratingCount).toFixed(1) : '—';
-  const stars = f.ratingCount>0 ? Math.round(f.ratingSum/f.ratingCount) : 0;
+function fileCardHTML(file, sectionOverride = null) {
+  const section = sectionOverride || file.section || currentPage;
+  const color = thumbColors[Math.abs((file.title || '').length) % thumbColors.length];
+
+  const avgRating = Number(file.rating || 0);
+  const ratingsCount = Number(file.ratingsCount || 0);
+  const rounded = Math.round(avgRating);
+
+  const stars = Array.from({ length: 5 }, (_, i) =>
+    `<span class="${i < rounded ? 'sf' : ''}">★</span>`
+  ).join('');
+
+  const isOwner = canDeleteResource(file);
+
   return `
-  <div class="file-card">
-    <div class="file-thumb ${thumb}">
-      <div class="file-pdf"><div class="pdf-tag">PDF</div></div>
-      ${f.isNew?'<span class="file-badge badge-new">New</span>':''}
-      ${f.flagged?'<span class="file-badge badge-flagged">Flagged</span>':''}
-    </div>
-    <div class="file-body">
-      <div class="file-title">${f.title||'Untitled'}</div>
-      ${f.examYear?`<div style="font-size:.7rem;font-weight:700;color:var(--amber);margin-bottom:.3rem;">📅 ${f.examYear} Exam</div>`:''}
-      <div class="file-meta">
-        <div class="star-display">
-          ${'★'.repeat(stars)}${'☆'.repeat(5-stars)}
-          <span class="star-count">${avg}${f.ratingCount>0?' ('+f.ratingCount+')':''}</span>
+    <div class="file-card">
+      <div class="file-thumb ${color}">
+        <div class="file-pdf">
+          <span class="pdf-tag">PDF</span>
         </div>
-        <button class="btn btn-primary" style="font-size:.72rem;padding:.28rem .65rem;" onclick="openFilePreview(${JSON.stringify(f).replace(/"/g,'&quot;')})">Open</button>
-        ${(currentUser && (f.uploaderUid === currentUser.uid || currentUserData?.role === 'owner' || currentUserData?.role === 'admin'))
-          ? `<button class="btn btn-danger" style="font-size:.68rem;padding:.25rem .55rem;margin-left:.2rem;" onclick="event.stopPropagation();confirmDelete('${f.id}','${f.section||currentPage}',this)">🗑</button>`
-          : ''}
+
+        ${isOwner ? `
+          <button
+            onclick="event.stopPropagation(); deleteResource('${section}','${file.id}','${(file.title || 'Untitled').replace(/'/g, "\\'")}')"
+            title="Delete file"
+            style="
+              position:absolute;
+              top:8px;
+              left:8px;
+              background:#fff0f0;
+              color:#e03131;
+              border:1px solid #ffd0d0;
+              border-radius:8px;
+              padding:6px 8px;
+              cursor:pointer;
+              font-size:.72rem;
+              font-weight:700;
+              z-index:2;
+            "
+          >🗑</button>
+        ` : ''}
+
+        <span class="file-badge badge-new">New</span>
       </div>
-      <div style="display:flex;align-items:center;gap:.35rem;margin-top:.4rem;flex-wrap:wrap;">
-        ${f.uploaderRole==='verified'||f.uploaderRole==='admin'?'<span class="verified-tag">✓ Verified</span>':''}
-        <span style="font-size:.68rem;color:var(--muted)">${f.uploaderName||''}</span>
-      </div>
-      <!-- Star rating -->
-      <div style="margin-top:.5rem;display:flex;align-items:center;gap:.3rem;">
-        <span style="font-size:.7rem;color:var(--muted)">Rate:</span>
-        <div class="star-rate" id="sr-${f.id}">
-          ${[1,2,3,4,5].map(n=>`<span onclick="rateFile('${f.id}','${f.section||currentPage}',${n})" onmouseover="hoverStars('sr-${f.id}',${n})" onmouseout="resetStars('sr-${f.id}',${stars})">${n<=stars?'★':'☆'}</span>`).join('')}
+
+      <div class="file-body">
+        <div class="file-title">${file.title || 'Untitled'}</div>
+
+        <div class="file-meta">
+          <div class="star-display">
+            ${stars}
+            <span class="star-count">${ratingsCount ? `${avgRating.toFixed(1)} (${ratingsCount})` : '—'}</span>
+          </div>
+
+          <button
+            class="btn btn-primary"
+            style="padding:.35rem .8rem;font-size:.75rem;"
+            onclick="openFilePreviewById('${section}','${file.id}')"
+          >
+            Open
+          </button>
+        </div>
+
+        <div style="font-size:.78rem;color:var(--muted);margin-bottom:.7rem;">
+         ${file.uploadedBy || file.uploaderName || file.uploadedByName || 'Unknown'}
+        </div>
+
+        <div style="font-size:.78rem;font-weight:600;color:var(--muted);margin-bottom:.35rem;">
+          Rate:
+        </div>
+
+        <div class="star-rate" data-file-id="${file.id}" data-section="${section}">
+          ${Array.from({ length: 5 }, (_, i) => `
+            <span onclick="rateResource('${section}','${file.id}',${i + 1})">★</span>
+          `).join('')}
         </div>
       </div>
     </div>
-  </div>`;
+  `;
 }
+window.openFilePreviewById = async (section, id) => {
+  try {
+    const snap = await getDoc(doc(db, section, id));
+    if (!snap.exists()) {
+      showToast('File not found.');
+      return;
+    }
+
+    const file = { id: snap.id, section, ...snap.data() };
+    openFilePreview(file);
+  } catch (e) {
+    console.error('openFilePreviewById error:', e);
+    showToast('Failed to open file.');
+  }
+};
 
 // ── FILE PREVIEW MODAL (open file) ──
 window.openFilePreview = (f) => {
-  if (typeof f === 'string') f = JSON.parse(f);
-  const url = f.fileUrl || f.link;
-  if (!url) { showToast('No link available for this file.'); return; }
+  if (!f) return;
+
+  if (typeof f === 'string') {
+    try {
+      f = JSON.parse(f);
+    } catch (e) {
+      console.error('Invalid file preview payload:', e);
+      showToast('Could not open file.');
+      return;
+    }
+  }
+
+  const url = f.fileUrl || f.externalLink || f.link || '';
+
+  console.log('Opening file:', f);
+  console.log('Resolved URL:', url);
+
+  if (!url) {
+    showToast('No link available for this file.');
+    return;
+  }
+
   window.open(url, '_blank');
-  updateDoc(doc(db, f.section||currentPage, f.id), { views: increment(1) }).catch(()=>{});
+
+  if (f.id && (f.section || currentPage)) {
+    updateDoc(doc(db, f.section || currentPage, f.id), {
+      views: increment(1)
+    }).catch(() => {});
+  }
 };
 
 // ── STAR RATING ──
@@ -1194,7 +1365,49 @@ window.rateFile = async (fileId, section, stars) => {
   await addPoints(currentUser?.uid, 2);
   currentUserData.points = (currentUserData.points||0)+2;
 };
-
+// DELETE FILE FUNCTION - Users can delete their own files, admins can delete any file
+window.deleteFile = async (fileId, section, event) => {
+  if (event) event.stopPropagation();
+  
+  if (!confirm("⚠️ Delete this file permanently? This action cannot be undone.")) return;
+  
+  try {
+    // Verify permission: user is owner OR admin
+    const fileRef = doc(db, section, fileId);
+    const fileSnap = await getDoc(fileRef);
+    
+    if (!fileSnap.exists()) {
+      showToast("File not found.");
+      return;
+    }
+    
+    const fileData = fileSnap.data();
+    const isOwner = fileData.uploaderUid === currentUser?.uid;
+    const isAdmin = currentUserData?.role === 'admin' || currentUserData?.role === 'owner';
+    
+    if (!isOwner && !isAdmin) {
+      showToast("You can only delete your own uploads.");
+      return;
+    }
+    
+    await deleteDoc(fileRef);
+    showToast("File deleted successfully.");
+    
+    // Refresh the current view
+    if (currentPage === 'home') await renderHome();
+    else if (currentPage === 'resources') await renderBrowseAll();
+    else if (['lecture','pastpapers','textbooks','studentnotes'].includes(currentPage)) {
+      folderPath = [];
+      await renderResourcePage(currentPage);
+    }
+    
+    // Reload resources for search
+    await loadAllResources();
+    
+  } catch(e) { 
+    showToast("Delete failed: " + e.message); 
+  }
+};
 // ── UPLOAD ──
 function uploadPanelHTML(type, canUpload) {
   if (!canUpload) return '';
@@ -1212,14 +1425,46 @@ window.openUpload = (type) => {
   uploadedFile = null;
   document.getElementById('selectedFileName').textContent = '';
 };
-window.closeUpload = () => document.getElementById('uploadModal').classList.add('hidden');
+window.closeUpload = () => {
+  document.getElementById('uploadModal').classList.add('hidden');
+
+  document.getElementById('up_title').value = '';
+  document.getElementById('up_subject').value = '';
+  document.getElementById('up_desc').value = '';
+  document.getElementById('up_link').value = '';
+
+  const examYearEl = document.getElementById('up_examyear');
+  if (examYearEl) examYearEl.value = '';
+
+  const fileInput = document.getElementById('up_file');
+  if (fileInput) fileInput.value = '';
+
+  const selectedFileName = document.getElementById('selectedFileName');
+  if (selectedFileName) selectedFileName.textContent = '';
+
+  const uploadError = document.getElementById('uploadError');
+  if (uploadError) uploadError.classList.remove('visible');
+
+  uploadedFile = null;
+};
 
 window.handleFileSelect = (input) => {
+  if (!input.files || !input.files[0]) return;
+
   const file = input.files[0];
-  if (!file) return;
-  if (file.size > 10*1024*1024) { showToast('File too large. Max 10MB.'); input.value=''; return; }
+
+  if (file.size > 10 * 1024 * 1024) {
+    showToast('File size must be under 10MB.');
+    input.value = '';
+    return;
+  }
+
   uploadedFile = file;
-  document.getElementById('selectedFileName').textContent = `✓ ${file.name} (${(file.size/1024/1024).toFixed(1)}MB)`;
+
+  const selectedFileName = document.getElementById('selectedFileName');
+  if (selectedFileName) {
+    selectedFileName.textContent = file.name;
+  }
 };
 
 // file drop
@@ -1241,66 +1486,88 @@ window.submitUpload = async () => {
   const branch = document.getElementById('up_branch').value;
   const term = document.getElementById('up_term').value;
   const subject = document.getElementById('up_subject').value.trim();
-  const examYear = document.getElementById('up_examyear').value.trim();
+  const examYear = document.getElementById('up_examyear')?.value.trim() || '';
   const desc = document.getElementById('up_desc').value.trim();
   const link = document.getElementById('up_link').value.trim();
   const err = document.getElementById('uploadError');
-  err.classList.remove('visible');
+  const btn = document.getElementById('uploadBtn');
 
-  if (!title||!subject) { showErr(err,'Please fill in title and subject.'); return; }
-  if (!uploadedFile && !link) { showErr(err,'Please upload a file or provide a link.'); return; }
-
-  if (uploadSection==='studentnotes' && moderateContent(title, desc)) {
-    showErr(err,'⚠️ Your upload contains inappropriate content. Please keep it academic.');
-    await addDoc(collection(db,'moderation_flags'),{title,desc,uploadedBy:currentUser?.uid || '',reason:'keyword',ts:serverTimestamp()});
+  if (!uploadSection) {
+    showErr(err, 'Upload section not selected.');
     return;
   }
 
-  const btn = document.getElementById('uploadBtn');
-  btn.disabled=true; btn.textContent='Uploading...';
+  if (!title || !subject) {
+    showErr(err, 'Please fill title and subject.');
+    return;
+  }
+
+  if (!uploadedFile && !link) {
+    showErr(err, 'Please upload a file or provide a link.');
+    return;
+  }
+
+  if (uploadSection === 'pastpapers' && !examYear) {
+    showErr(err, 'Please enter exam year for past papers.');
+    return;
+  }
+
+  btn.disabled = true;
+  btn.textContent = 'Uploading...';
+  err.classList.remove('visible');
 
   try {
-    let fileUrl = link || '';
+    let fileUrl = '';
     let fileName = '';
 
-    if (uploadedFile) {
-  btn.textContent = 'Uploading file...';
-  const uploadRes = await uploadToPuter(uploadedFile);
-  fileUrl = uploadRes.secure_url;
-  fileName = uploadedFile.name;
-  btn.textContent = 'Saving...';
+    let filePath = '';
+
+if (uploadedFile) {
+  const uploadRes = await uploadToSupabase(uploadedFile, uploadSection, {
+    engYear,
+    branch,
+    subject,
+    examYear
+  });
+
+  fileUrl = uploadRes.secure_url || '';
+  fileName = uploadRes.name || uploadedFile.name || '';
+  filePath = uploadRes.path || '';
 }
 
-    const data = {
-      title, engYear, branch, term, subject, description:desc,
-      fileUrl, fileName, link: link||'',
-      examYear: uploadSection==='pastpapers'&&examYear?examYear:'',
-      uploaderName: currentUserData?.name||'Anonymous',
-      uploaderRole: currentUserData?.role||'user',
-      uploaderUid: currentUser?.uid || '',
-      section: uploadSection,
-      isNew:true, flagged:false,
-      ratingSum:0, ratingCount:0, views:0,
-      createdAt:serverTimestamp()
-    };
-    console.log("UPLOAD SECTION:", uploadSection);
-    await addDoc(collection(db, uploadSection), data);
-    if (currentUser?.uid) {
-      await addPoints(currentUser?.uid, 10);
-    }
+    await addDoc(collection(db, uploadSection), {
+      title,
+      engYear,
+      branch,
+      term,
+      subject,
+      examYear: uploadSection === 'pastpapers' ? examYear : '',
+      description: desc,
+      fileUrl,
+      filePath,
+      fileName,
+      externalLink: link || '',
+      uploadedBy: currentUserData?.name || 'Unknown',
+      uploadedByUid: currentUser?.uid || '',
+      uploaderRole: currentUserData?.role || 'student',
+      createdAt: serverTimestamp(),
+      rating: 0,
+      ratingsCount: 0,
+      downloads: 0
+    });
+
+    await addPoints(currentUser?.uid, 5);
+    showToast('Resource uploaded successfully!');
     closeUpload();
-    showToast(`"${title}" uploaded! +10 points earned.`);
-    ['up_title','up_subject','up_link','up_examyear','up_desc'].forEach(id=>document.getElementById(id).value='');
-    uploadedFile=null;
-    document.getElementById('selectedFileName').textContent='';
-    allResources = allResources.filter(r=>r.id!=='new');
-    loadAllResources();
-    folderPath=[];
-    renderResourcePage(uploadSection);
-  } catch(e) {
-    showErr(err,'Upload failed: '+e.message);
+    await loadAllResources();
+    renderPage();
+  } catch (e) {
+    console.error('Upload error:', e);
+    showErr(err, e.message || 'Upload failed.');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Upload Resource';
   }
-  btn.disabled=false; btn.textContent='Upload Resource';
 };
 
 // ── FORUMS ──
@@ -1497,101 +1764,234 @@ window.rateAnswer=async(doubtId,ansIdx,stars)=>{
 async function renderProfile() {
   const mc = document.getElementById('mainContent');
   const u = currentUserData || {};
-  const isVerified = u.role==='verified'||u.role==='admin';
-  const isPending = u.verificationStatus==='pending';
-  mc.innerHTML=`
-  <div class="page-header"><h1 class="page-title">My Account</h1></div>
-  <div class="card" style="margin-bottom:1rem;">
-    <div class="profile-header">
-      <div class="profile-avatar-big">${(u.name||'SU').split(' ').map(w=>w[0]).join('').slice(0,2).toUpperCase()}</div>
-      <div>
-        <div class="profile-name">${u.name||'Student'}</div>
-        <div class="profile-sub">${u.email||''} · ${u.studentId||''}</div>
-        <div style="margin-top:.4rem;display:flex;gap:.4rem;flex-wrap:wrap;">
-          <span class="role-pill ${isVerified?'role-verified':'role-student'}">${isVerified?'✓ Verified':u.role==='admin'?'⚡ Admin':'Student'}</span>
-          <span style="font-size:.75rem;color:var(--muted);">🏆 ${u.points||0} points</span>
+
+  const isVerified = ['verified', 'admin', 'owner'].includes(u.role);
+  const isPending = u.verificationStatus === 'pending';
+
+  mc.innerHTML = `
+    <div class="page-header">
+      <h1 class="page-title">My Account</h1>
+    </div>
+
+    <!-- Profile Card -->
+    <div class="card" style="margin-bottom:1rem;">
+      <div class="profile-header">
+        <div class="profile-avatar-big">
+          ${(u.name || 'SU').split(' ').map(w => w[0]).join('').slice(0, 2).toUpperCase()}
+        </div>
+        <div>
+          <div class="profile-name">${u.name || 'Student'}</div>
+          <div class="profile-sub">${u.email || ''} · ${u.studentId || ''}</div>
+          <div style="margin-top:.4rem;display:flex;gap:.4rem;flex-wrap:wrap;">
+            <span class="role-pill ${isVerified ? 'role-verified' : 'role-student'}">
+              ${u.role === 'owner' ? '👑 Owner' :
+                u.role === 'admin' ? '⚡ Admin' :
+                isVerified ? '✓ Verified' : 'Student'}
+            </span>
+            <span style="font-size:.75rem;color:var(--muted);">🏆 ${u.points || 0} points</span>
+          </div>
         </div>
       </div>
-    </div>
-    <div class="profile-grid">
-      <div class="form-group"><label>Full Name</label><input type="text" id="edit_name" value="${u.name||''}"/></div>
-      <div class="form-group"><label>Branch</label>
-        <select id="edit_branch">
-          ${['Computer Engineering','Mechanical Engineering','Electronics & Telecom','Civil Engineering','Information Technology'].map(b=>`<option${u.branch===b?' selected':''}>${b}</option>`).join('')}
-        </select>
+
+      <div class="profile-grid">
+        <div class="form-group">
+          <label>Full Name</label>
+          <input type="text" id="edit_name" value="${u.name || ''}"/>
+        </div>
+
+        <div class="form-group">
+          <label>Branch</label>
+          <select id="edit_branch">
+            ${[
+              'Computer Engineering',
+              'Mechanical Engineering',
+              'Electronics & Telecom',
+              'Civil Engineering',
+              'Information Technology'
+            ]
+              .map(b => `<option ${u.branch === b ? 'selected' : ''}>${b}</option>`)
+              .join('')
+            }
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label>Student ID</label>
+          <input type="text" id="edit_sid" value="${u.studentId || ''}"/>
+        </div>
+
+        <div class="form-group">
+          <label>Email</label>
+          <input type="text" value="${u.email || ''}" disabled style="opacity:.6;"/>
+        </div>
       </div>
-      <div class="form-group"><label>Student ID</label><input type="text" id="edit_sid" value="${u.studentId||''}"/></div>
-      <div class="form-group"><label>Email</label><input type="text" value="${u.email||''}" disabled style="opacity:.6;"/></div>
-    </div>
-    <button class="btn btn-primary" onclick="saveProfile()">Save Changes</button>
-  </div>
 
-  ${(currentUserData?.role === 'owner' || currentUserData?.role === 'admin') ? `
-  <div class="card" style="margin-bottom:1rem;">
-    <h3 style="margin-bottom:1rem;">Grant Access</h3>
-
-    <div class="form-group">
-      <label>User Email</label>
-      <input type="email" id="grantEmail" placeholder="teacher@college.edu" />
-    </div>
-
-    <div class="form-group">
-      <label>Assign Role</label>
-      <select id="grantRole">
-        <option value="author">Author</option>
-        <option value="admin">Admin</option>
-      </select>
-    </div>
-
-    <button class="btn btn-primary" onclick="grantAccess()">Grant Access</button>
-    <div class="form-error" id="grantAccessError"></div>
-  </div>
-` : ''}
-
-
-  <!-- Verification Request -->
-  <div class="card" style="margin-bottom:1rem;">
-    <h3 style="font-size:.95rem;font-weight:800;margin-bottom:.75rem;">🔐 Upload Verification</h3>
-    ${isVerified?`<div class="verify-status-verified">✓ You are a verified uploader — you can upload Lecture Notes, Past Papers, and Textbooks.</div>`
-    :isPending?`<div class="verify-status-pending">⏳ Verification request pending. Admin will review soon.</div>`
-    :`<div class="verify-request-card">
-      <h4>Apply for Verified Uploader Status</h4>
-      <p>Verified status lets you upload Lecture Notes, Past Papers, and Textbooks, and post Course Forum notices. Teachers and Class Representatives can apply.</p>
-      <div class="form-group"><label>Your Role</label>
-        <select id="vr_role"><option value="teacher">Teacher / Professor</option><option value="cr">Class Representative (CR)</option><option value="other">Other Academic Staff</option></select>
+      <div class="btn-row">
+        <button class="btn btn-primary" onclick="saveProfile()">Save Changes</button>
       </div>
-      <div class="form-group"><label>Reason / Department</label><textarea id="vr_reason" placeholder="Briefly explain your role and department..."></textarea></div>
-      <button class="btn btn-primary" onclick="requestVerification()">Submit Request</button>
-    </div>`}
-  </div>
+    </div>
 
-  <!-- Danger Zone -->
-  <div class="card">
-    <h3 style="font-size:.95rem;font-weight:800;margin-bottom:.75rem;color:var(--red);">⚠️ Account</h3>
-    <button class="btn btn-danger" onclick="doLogout()">Logout</button>
-  </div>`;
+    ${(currentUserData?.role === 'owner' || currentUserData?.role === 'admin') ? `
+      <!-- Grant Access -->
+      <div class="card" style="margin-bottom:1rem;">
+        <h3 style="margin-bottom:1rem;">Grant Access</h3>
+
+        <div class="form-group">
+          <label>User Email</label>
+          <input type="email" id="grantEmail" placeholder="teacher@college.edu" />
+        </div>
+
+        <div class="form-group">
+          <label>Assign Role</label>
+          <select id="grantRole">
+            <option value="author">Author</option>
+            <option value="admin">Admin</option>
+          </select>
+        </div>
+
+        <button class="btn btn-primary" onclick="grantAccess()">Grant Access</button>
+        <div class="form-error" id="grantAccessError"></div>
+      </div>
+    ` : ''}
+
+    <!-- Verification Request -->
+    <div class="card" style="margin-bottom:1rem;">
+      <h3 style="font-size:.95rem;font-weight:800;margin-bottom:.75rem;">🔐 Upload Verification</h3>
+
+      ${
+        isVerified
+          ? `<div class="verify-status-verified">✓ You are a verified uploader — you can upload Lecture Notes, Past Papers, and Textbooks.</div>`
+          : isPending
+          ? `<div class="verify-status-pending">⏳ Verification request pending. Admin will review soon.</div>`
+          : `
+            <div class="verify-request-card">
+              <h4>Apply for Verified Uploader Status</h4>
+              <p>Verified status lets you upload Lecture Notes, Past Papers, and Textbooks, and post Course Forum notices. Teachers and Class Representatives can apply.</p>
+
+              <div class="form-group">
+                <label>Your Role</label>
+                <select id="vr_role">
+                  <option value="teacher">Teacher / Professor</option>
+                  <option value="cr">Class Representative (CR)</option>
+                  <option value="other">Other Academic Staff</option>
+                </select>
+              </div>
+
+              <div class="form-group">
+                <label>Reason / Department</label>
+                <textarea id="vr_reason" placeholder="Briefly explain your role and department..."></textarea>
+              </div>
+
+              <button class="btn btn-primary" onclick="requestVerification()">Submit Request</button>
+            </div>
+          `
+      }
+    </div>
+
+    <!-- Danger Zone -->
+    <div class="card">
+      <h3 style="font-size:.95rem;font-weight:800;margin-bottom:.75rem;color:var(--red);">⚠️ Account</h3>
+      <button class="btn btn-danger" onclick="doLogout()">Logout</button>
+    </div>
+  `;
 }
 
 window.saveProfile = async () => {
-  const name=document.getElementById('edit_name').value.trim();
-  const branch=document.getElementById('edit_branch').value;
-  const studentId=document.getElementById('edit_sid').value.trim();
-  if(!name){showToast('Name cannot be empty.');return;}
-  await updateDoc(doc(db,'users',currentUser?.uid || ''),{name,branch,studentId});
-  currentUserData={...currentUserData,name,branch,studentId};
-  updateTopbar();
-  showToast('Profile updated!');
+  if (!currentUser) {
+    showToast("You must be logged in to update your profile.");
+    return;
+  }
+
+  const nameEl = document.getElementById('edit_name');
+  const branchEl = document.getElementById('edit_branch');
+  const sidEl = document.getElementById('edit_sid');
+
+  if (!nameEl || !branchEl || !sidEl) {
+    showToast("Profile form is not loaded properly.");
+    return;
+  }
+
+  const name = nameEl.value.trim();
+  const branch = branchEl.value.trim();
+  const studentId = sidEl.value.trim();
+
+  if (!name) {
+    showToast("Name cannot be empty.");
+    return;
+  }
+
+  try {
+    const userRef = doc(db, 'users', currentUser.uid);
+
+    await setDoc(userRef, {
+      name,
+      branch,
+      studentId,
+      updatedAt: serverTimestamp()
+    }, { merge: true });
+
+    currentUserData = {
+      ...currentUserData,
+      name,
+      branch,
+      studentId
+    };
+
+    updateTopbar();
+    showToast("Profile updated successfully.");
+  } catch (e) {
+    console.error("saveProfile error:", e);
+    showToast("Failed to save profile.");
+  }
 };
 
 window.requestVerification = async () => {
-  const role=document.getElementById('vr_role')?.value;
-  const reason=document.getElementById('vr_reason')?.value.trim();
-  if(!reason){showToast('Please fill in your reason.');return;}
-  await updateDoc(doc(db,'users',currentUser?.uid || ''),{verificationStatus:'pending',verificationRole:role,verificationReason:reason,verificationRequestedAt:serverTimestamp()});
-  await addDoc(collection(db,'verification_requests'),{uid:currentUser?.uid || '',name:currentUserData?.name,email:currentUserData?.email,role,reason,status:'pending',requestedAt:serverTimestamp()});
-  currentUserData.verificationStatus='pending';
-  showToast('Verification request submitted!');
-  renderProfile();
+  if (!currentUser) {
+    showToast('You must be logged in.');
+    return;
+  }
+
+  const roleEl = document.getElementById('vr_role');
+  const reasonEl = document.getElementById('vr_reason');
+
+  if (!roleEl || !reasonEl) {
+    showToast('Verification form not found.');
+    return;
+  }
+
+  const requestedRole = roleEl.value;
+  const reason = reasonEl.value.trim();
+
+  if (!reason) {
+    showToast('Please enter your reason / department.');
+    return;
+  }
+
+  try {
+    await setDoc(doc(db, 'verificationRequests', currentUser.uid), {
+      uid: currentUser.uid,
+      name: currentUserData?.name || 'Unknown',
+      email: currentUserData?.email || currentUser?.email || '',
+      branch: currentUserData?.branch || '',
+      studentId: currentUserData?.studentId || '',
+      requestedRole,
+      reason,
+      status: 'pending',
+      createdAt: serverTimestamp()
+    });
+
+    await updateDoc(doc(db, 'users', currentUser.uid), {
+      verificationStatus: 'pending'
+    });
+
+    currentUserData.verificationStatus = 'pending';
+
+    showToast('Verification request submitted.');
+    renderProfile();
+  } catch (e) {
+    console.error('requestVerification error:', e);
+    showToast('Failed to submit verification request.');
+  }
 };
 
 // ── LEADERBOARD ──
@@ -1622,7 +2022,11 @@ async function renderLeaderboard() {
 
 // ── ADMIN PANEL ──
 async function renderAdmin() {
-  if (currentUserData?.role!=='admin'){document.getElementById('mainContent').innerHTML='<p style="color:var(--red);padding:2rem">Access denied.</p>';return;}
+  if (!(currentUserData?.role === 'admin' || currentUserData?.role === 'owner')) {
+  document.getElementById('mainContent').innerHTML =
+    '<p style="color:var(--red);padding:2rem">Access denied.</p>';
+  return;
+}
   const mc = document.getElementById('mainContent');
   mc.innerHTML=`<div class="loading-state"><div class="spinner"></div>Loading...</div>`;
   const [vReqs, flagged] = await Promise.all([
@@ -1699,13 +2103,25 @@ window.clearNotifs=()=>{
 };
 
 // ── TOAST ──
+// — TOAST —
 window.showToast=(msg)=>{
-  const t=document.getElementById('toast');
-  t.textContent=msg; t.classList.remove('hidden');
-  clearTimeout(window._tt);
-  window._tt=setTimeout(()=>t.classList.add('hidden'),3200);
+    const t=document.getElementById('toast');
+    t.textContent=msg; t.classList.remove('hidden');
+    clearTimeout(window._tt);
+    window._tt=setTimeout(()=>t.classList.add('hidden'),3200);
 };
-function showToast(msg){window.showToast(msg);}
+function showToast(msg) {
+  const toast = document.getElementById('toast');
+  if (!toast) return;
+
+  toast.textContent = msg;
+  toast.classList.remove('hidden');
+
+  clearTimeout(window.__toastTimer);
+  window.__toastTimer = setTimeout(() => {
+    toast.classList.add('hidden');
+  }, 2500);
+}
 </script>
 </body>
 </html>
